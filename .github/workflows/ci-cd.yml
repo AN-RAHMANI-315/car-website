@@ -275,10 +275,31 @@ jobs:
 
     - name: 📋 Terraform Plan
       run: |
-        terraform plan \
+        echo "🔄 Planning Terraform deployment..."
+        
+        # Create plan with detailed logging
+        if ! terraform plan \
           -var="image_uri=${{ needs.build.outputs.image-tag }}" \
           -var="environment=production" \
-          -out=tfplan
+          -detailed-exitcode \
+          -out=tfplan; then
+          
+          PLAN_EXIT_CODE=$?
+          echo "⚠️ Terraform plan exit code: $PLAN_EXIT_CODE"
+          
+          if [ $PLAN_EXIT_CODE -eq 2 ]; then
+            echo "✅ Plan succeeded with changes detected."
+          else
+            echo "❌ Plan failed. Showing more details..."
+            terraform plan \
+              -var="image_uri=${{ needs.build.outputs.image-tag }}" \
+              -var="environment=production" \
+              -no-color
+            exit 1
+          fi
+        else
+          echo "✅ Terraform plan completed successfully."
+        fi
 
     - name: 🚀 Terraform Apply (with conflict resolution)
       run: |
@@ -291,6 +312,16 @@ jobs:
           
           # Set continue on error for imports and cleanup
           set +e
+          
+          # First, handle ECS services that might reference old network configs
+          echo "🔄 Checking for ECS service conflicts..."
+          
+          # Stop any existing ECS service that might have old network configuration
+          if aws ecs describe-services --cluster automax-dealership-cluster --services automax-dealership-service --query 'services[0].serviceName' --output text 2>/dev/null | grep -q automax-dealership-service; then
+            echo "🔄 Updating ECS service to desired count 0 to handle network changes..."
+            aws ecs update-service --cluster automax-dealership-cluster --service automax-dealership-service --desired-count 0 2>/dev/null || echo "ECS service update skipped"
+            sleep 30  # Wait for tasks to stop
+          fi
           
           # First, try to release any unused EIPs to free up quota
           echo "🧹 Cleaning up unused EIPs..."
