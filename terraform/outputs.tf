@@ -15,10 +15,12 @@ output "public_subnet_ids" {
   value       = aws_subnet.public[*].id
 }
 
-output "private_subnet_ids" {
-  description = "IDs of the private subnets"
-  value       = aws_subnet.private[*].id
-}
+# Note: Private subnets disabled to avoid EIP limits and reduce costs
+# ECS now runs in public subnets with security group protection
+# output "private_subnet_ids" {
+#   description = "IDs of the private subnets" 
+#   value       = aws_subnet.private[*].id
+# }
 
 # Load Balancer Outputs
 output "load_balancer_dns" {
@@ -102,8 +104,8 @@ output "application_url" {
   value       = "http://${aws_lb.main.dns_name}"
 }
 
-# Health Check URL
+# Health Check URL (updated to root path for static website)
 output "health_check_url" {
   description = "URL for health check"
-  value       = "http://${aws_lb.main.dns_name}/health"
+  value       = "http://${aws_lb.main.dns_name}/"
 }

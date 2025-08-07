@@ -89,6 +89,7 @@ automax-dealership/
 | Component | Purpose | Configuration |
 |-----------|---------|---------------|
 | **VPC** | Network isolation | 10.0.0.0/16 CIDR |
+| **Public Subnets** | ECS container hosting | Multi-AZ deployment |
 | **ALB** | Load balancing | HTTP/HTTPS traffic |
 | **ECS Fargate** | Container hosting | Auto-scaling enabled |
 | **ECR** | Container registry | Image scanning enabled |
@@ -189,7 +190,7 @@ SLACK_WEBHOOK_URL       # Slack webhook for notifications
 - **Custom Metrics**: Business KPIs
 
 ### Health Checks
-- **Load Balancer**: `/health` endpoint
+- **Load Balancer**: `/` (root path)
 - **Container**: Internal health checks
 - **Application**: Custom health monitoring
 
@@ -201,11 +202,12 @@ SLACK_WEBHOOK_URL       # Slack webhook for notifications
 ## � Security Features
 
 ### Infrastructure Security
-- ✅ **VPC Isolation**: Private subnets for applications
-- ✅ **Security Groups**: Restrictive network rules
+- ✅ **VPC Isolation**: Dedicated network with security groups
+- ✅ **Security Groups**: Restrictive network rules (ALB → ECS only)
 - ✅ **IAM Roles**: Least privilege access
 - ✅ **Encryption**: EBS and ECR encryption
 - ✅ **HTTPS**: SSL/TLS termination at ALB
+- ✅ **Public Subnet Security**: ECS containers protected by security groups
 
 ### Container Security
 - ✅ **Non-root User**: Container runs as nginx user
