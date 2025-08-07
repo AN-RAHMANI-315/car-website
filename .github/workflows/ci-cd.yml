@@ -69,11 +69,41 @@ jobs:
         echo "Test execution completed"
         echo "Timestamp: $(date)"
 
-  # Job 2: Build and Push Docker Image
+  # Job 2: Create ECR Repository
+  create-ecr:
+    name: 🏗️ Create ECR Repository
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: 🔐 Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: 🏗️ Create ECR Repository if not exists
+      run: |
+        # Check if repository exists, create if it doesn't
+        aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} || \
+        aws ecr create-repository \
+          --repository-name ${{ env.ECR_REPOSITORY }} \
+          --region ${{ env.AWS_REGION }} \
+          --image-scanning-configuration scanOnPush=true \
+          --encryption-configuration encryptionType=AES256
+        
+        echo "✅ ECR repository ready: ${{ env.ECR_REPOSITORY }}"
+
+  # Job 3: Build and Push Docker Image
   build:
     name: 🐳 Build & Push Docker Image
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, create-ecr]
     if: github.ref == 'refs/heads/main'
     
     outputs:
@@ -182,7 +212,7 @@ jobs:
         fi
         echo "- 📊 Table format scan completed (see logs above)" >> $GITHUB_STEP_SUMMARY
 
-  # Job 3: Deploy Infrastructure with Terraform
+  # Job 4: Deploy Infrastructure with Terraform
   deploy-infrastructure:
     name: 🚀 Deploy Infrastructure
     runs-on: ubuntu-latest
@@ -227,7 +257,7 @@ jobs:
         echo "Load Balancer DNS: $(terraform output -raw load_balancer_dns)"
         echo "ECS Cluster: $(terraform output -raw ecs_cluster_name)"
 
-  # Job 4: Deploy Application to ECS
+  # Job 5: Deploy Application to ECS
   deploy-application:
     name: 🎯 Deploy Application
     runs-on: ubuntu-latest
@@ -282,7 +312,7 @@ jobs:
         echo "🎉 Deployment successful!"
         echo "Application is available at: http://$LB_URL"
 
-  # Job 5: Post-Deployment Notifications
+  # Job 6: Post-Deployment Notifications
   notify:
     name: 📢 Notify Deployment Status
     runs-on: ubuntu-latest
