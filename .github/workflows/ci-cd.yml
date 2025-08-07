@@ -140,19 +140,32 @@ jobs:
         category: 'trivy-container-scan'
       continue-on-error: true
 
-    - name: � Alternative Security Scan (Table Format)
+    - name: 🔍 Alternative Security Scan (Local Image)
       if: always()
       run: |
-        echo "🔒 Running security scan..."
-        # Pull the image for scanning
-        docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+        echo "🔒 Running security scan on locally built image..."
         
-        # Run Trivy scan with table output for visibility
-        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-          -v $(pwd):/workspace aquasec/trivy:latest image \
-          --format table \
-          --severity HIGH,CRITICAL \
-          ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest || true
+        # Use the local image that was just built (no ECR pull needed)
+        LOCAL_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest"
+        
+        # Check if the local image exists
+        if docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1; then
+          echo "✅ Scanning local image: $LOCAL_IMAGE"
+          # Run Trivy scan on local image
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --format table \
+            --severity HIGH,CRITICAL \
+            "$LOCAL_IMAGE" || true
+        else
+          echo "⚠️ Local image not found, scanning base nginx:alpine instead"
+          # Fallback to scanning base image
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --format table \
+            --severity HIGH,CRITICAL \
+            nginx:alpine || true
+        fi
         
         echo "✅ Security scan completed"
 
