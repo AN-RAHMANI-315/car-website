@@ -107,7 +107,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     
     outputs:
-      image-tag: ${{ steps.meta.outputs.tags }}
+      image-tag: ${{ steps.image-uri.outputs.uri }}
       image-digest: ${{ steps.build.outputs.digest }}
 
     steps:
@@ -151,6 +151,14 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
+
+    - name: 🏷️ Set Image URI Output
+      id: image-uri
+      run: |
+        # Create a clean, single image URI for Terraform
+        IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest"
+        echo "uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
+        echo "✅ Image URI: ${IMAGE_URI}"
 
     - name: 🔍 Scan Image for Vulnerabilities
       uses: aquasecurity/trivy-action@master
@@ -267,26 +275,39 @@ jobs:
         # Try normal apply first
         if ! terraform apply -auto-approve tfplan; then
           echo "⚠️ Initial apply failed, likely due to existing resources."
-          echo "🔄 Attempting to import existing resources..."
+          echo "🔄 Attempting to resolve conflicts..."
           
-          # Import existing resources if they exist
-          set +e  # Continue on error
+          # Set continue on error for imports
+          set +e
           
-          # Try importing ALB
-          terraform import 'aws_lb.main' 'automax-dealership-alb' 2>/dev/null || echo "ALB import skipped"
+          # Import existing resources in correct order (dependencies first)
+          echo "🔄 Importing existing resources..."
           
-          # Try importing Target Group  
-          aws elbv2 describe-target-groups --names automax-dealership-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null | \
-          xargs -I {} terraform import 'aws_lb_target_group.main' {} 2>/dev/null || echo "TG import skipped"
-          
-          # Try importing CloudWatch Log Group
-          terraform import 'aws_cloudwatch_log_group.ecs' '/ecs/automax-dealership' 2>/dev/null || echo "Log group import skipped"
-          
-          # Try importing IAM roles
+          # 1. Import IAM roles first (no dependencies)
           terraform import 'aws_iam_role.ecs_task_execution' 'automax-dealership-ecs-task-execution-role' 2>/dev/null || echo "Task execution role import skipped"
           terraform import 'aws_iam_role.ecs_task' 'automax-dealership-ecs-task-role' 2>/dev/null || echo "Task role import skipped"
           
-          set -e  # Re-enable exit on error
+          # 2. Import CloudWatch Log Group
+          terraform import 'aws_cloudwatch_log_group.ecs' '/ecs/automax-dealership' 2>/dev/null || echo "Log group import skipped"
+          
+          # 3. Import ALB (before target group)
+          terraform import 'aws_lb.main' 'automax-dealership-alb' 2>/dev/null || echo "ALB import skipped"
+          
+          # 4. Import Target Group and handle listener dependencies
+          TG_ARN=$(aws elbv2 describe-target-groups --names automax-dealership-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || echo "")
+          if [ "$TG_ARN" != "" ] && [ "$TG_ARN" != "None" ]; then
+            # Import target group
+            terraform import 'aws_lb_target_group.main' "$TG_ARN" 2>/dev/null || echo "TG import skipped"
+            
+            # Get listener ARN and import if exists
+            LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "arn:aws:elasticloadbalancing:us-east-1:*:loadbalancer/app/automax-dealership-alb/*" --query 'Listeners[0].ListenerArn' --output text 2>/dev/null || echo "")
+            if [ "$LISTENER_ARN" != "" ] && [ "$LISTENER_ARN" != "None" ]; then
+              terraform import 'aws_lb_listener.main' "$LISTENER_ARN" 2>/dev/null || echo "Listener import skipped"
+            fi
+          fi
+          
+          # Re-enable exit on error
+          set -e
           
           echo "🔄 Re-planning after imports..."
           terraform plan \
