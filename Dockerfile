@@ -17,17 +17,13 @@ COPY static/script.js /usr/share/nginx/html/
 # Copy custom nginx configuration
 COPY nginx.conf /etc/nginx/nginx.conf
 
-# Create non-root user for security
-RUN addgroup -g 1001 -S nginx && \
-    adduser -S -D -H -u 1001 -h /var/cache/nginx -s /sbin/nologin -G nginx -g nginx nginx
-
-# Set permissions
+# Set proper permissions for existing nginx user
 RUN chown -R nginx:nginx /usr/share/nginx/html && \
     chown -R nginx:nginx /var/cache/nginx && \
     chown -R nginx:nginx /var/log/nginx && \
     chown -R nginx:nginx /etc/nginx/conf.d
 
-# Switch to non-root user
+# Switch to non-root user (nginx user already exists in base image)
 USER nginx
 
 # Expose port 80
