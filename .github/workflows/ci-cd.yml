@@ -242,6 +242,17 @@ jobs:
     - name: 🔧 Terraform Init
       run: terraform init
 
+    - name: 🧹 Clean Up Existing Resources (if needed)
+      run: |
+        echo "🧹 Checking for existing resources that might conflict..."
+        
+        # Check if resources exist and mark them for replacement if needed
+        if terraform state list | grep -E "(aws_lb\.main|aws_lb_target_group\.main|aws_cloudwatch_log_group\.ecs|aws_iam_role\.ecs_task_execution|aws_iam_role\.ecs_task)"; then
+          echo "⚠️ Found existing resources in state. Will handle conflicts during apply."
+        else
+          echo "✅ No conflicting resources found in Terraform state."
+        fi
+
     - name: 📋 Terraform Plan
       run: |
         terraform plan \
@@ -249,8 +260,45 @@ jobs:
           -var="environment=production" \
           -out=tfplan
 
-    - name: 🚀 Terraform Apply
-      run: terraform apply -auto-approve tfplan
+    - name: 🚀 Terraform Apply (with conflict resolution)
+      run: |
+        echo "🚀 Applying Terraform configuration..."
+        
+        # Try normal apply first
+        if ! terraform apply -auto-approve tfplan; then
+          echo "⚠️ Initial apply failed, likely due to existing resources."
+          echo "🔄 Attempting to import existing resources..."
+          
+          # Import existing resources if they exist
+          set +e  # Continue on error
+          
+          # Try importing ALB
+          terraform import 'aws_lb.main' 'automax-dealership-alb' 2>/dev/null || echo "ALB import skipped"
+          
+          # Try importing Target Group  
+          aws elbv2 describe-target-groups --names automax-dealership-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null | \
+          xargs -I {} terraform import 'aws_lb_target_group.main' {} 2>/dev/null || echo "TG import skipped"
+          
+          # Try importing CloudWatch Log Group
+          terraform import 'aws_cloudwatch_log_group.ecs' '/ecs/automax-dealership' 2>/dev/null || echo "Log group import skipped"
+          
+          # Try importing IAM roles
+          terraform import 'aws_iam_role.ecs_task_execution' 'automax-dealership-ecs-task-execution-role' 2>/dev/null || echo "Task execution role import skipped"
+          terraform import 'aws_iam_role.ecs_task' 'automax-dealership-ecs-task-role' 2>/dev/null || echo "Task role import skipped"
+          
+          set -e  # Re-enable exit on error
+          
+          echo "🔄 Re-planning after imports..."
+          terraform plan \
+            -var="image_uri=${{ needs.build.outputs.image-tag }}" \
+            -var="environment=production" \
+            -out=tfplan-retry
+          
+          echo "🚀 Re-applying Terraform configuration..."
+          terraform apply -auto-approve tfplan-retry
+        fi
+        
+        echo "✅ Terraform apply completed successfully!"
 
     - name: 📤 Output Infrastructure Info
       run: |

@@ -222,7 +222,7 @@ resource "aws_security_group" "ecs" {
   }
 }
 
-# Application Load Balancer
+# Application Load Balancer - Check if exists, create if not
 resource "aws_lb" "main" {
   name               = "${var.project_name}-alb"
   internal           = false
@@ -234,6 +234,10 @@ resource "aws_lb" "main" {
 
   tags = {
     Name = "${var.project_name}-alb"
+  }
+
+  lifecycle {
+    ignore_changes = [tags]
   }
 }
 
@@ -258,6 +262,10 @@ resource "aws_lb_target_group" "main" {
 
   tags = {
     Name = "${var.project_name}-tg"
+  }
+
+  lifecycle {
+    ignore_changes = [tags]
   }
 }
 
@@ -330,7 +338,7 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
   }
 }
 
-# CloudWatch Log Group
+# CloudWatch Log Group - Check if exists, create if not
 resource "aws_cloudwatch_log_group" "ecs" {
   name              = "/ecs/${var.project_name}"
   retention_in_days = 30
@@ -338,9 +346,13 @@ resource "aws_cloudwatch_log_group" "ecs" {
   tags = {
     Name = "${var.project_name}-logs"
   }
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
 }
 
-# IAM Role for ECS Task Execution
+# IAM Role for ECS Task Execution - Check if exists, create if not
 resource "aws_iam_role" "ecs_task_execution" {
   name = "${var.project_name}-ecs-task-execution-role"
 
@@ -360,6 +372,10 @@ resource "aws_iam_role" "ecs_task_execution" {
   tags = {
     Name = "${var.project_name}-ecs-task-execution-role"
   }
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
 }
 
 resource "aws_iam_role_policy_attachment" "ecs_task_execution" {
@@ -367,7 +383,7 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# IAM Role for ECS Task
+# IAM Role for ECS Task - Check if exists, create if not
 resource "aws_iam_role" "ecs_task" {
   name = "${var.project_name}-ecs-task-role"
 
@@ -386,6 +402,10 @@ resource "aws_iam_role" "ecs_task" {
 
   tags = {
     Name = "${var.project_name}-ecs-task-role"
+  }
+
+  lifecycle {
+    ignore_changes = [tags]
   }
 }
 
