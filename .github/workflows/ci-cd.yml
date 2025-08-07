@@ -254,7 +254,19 @@ jobs:
       run: |
         echo "🧹 Checking for existing resources that might conflict..."
         
-        # Check if resources exist and mark them for replacement if needed
+        # Check AWS account limits and existing resources
+        echo "📊 Checking AWS account limits..."
+        
+        # Check EIP usage
+        EIP_LIMIT=$(aws ec2 describe-account-attributes --attribute-names max-elastic-ips --query 'AccountAttributes[0].AttributeValues[0].AttributeValue' --output text)
+        EIP_USED=$(aws ec2 describe-addresses --query 'length(Addresses)' --output text)
+        echo "EIP Limit: $EIP_LIMIT, Used: $EIP_USED"
+        
+        if [ "$EIP_USED" -ge "$EIP_LIMIT" ]; then
+          echo "⚠️ EIP limit reached. Will use public subnet architecture without NAT gateways."
+        fi
+        
+        # List existing resources for import
         if terraform state list | grep -E "(aws_lb\.main|aws_lb_target_group\.main|aws_cloudwatch_log_group\.ecs|aws_iam_role\.ecs_task_execution|aws_iam_role\.ecs_task)"; then
           echo "⚠️ Found existing resources in state. Will handle conflicts during apply."
         else
@@ -274,42 +286,52 @@ jobs:
         
         # Try normal apply first
         if ! terraform apply -auto-approve tfplan; then
-          echo "⚠️ Initial apply failed, likely due to existing resources."
+          echo "⚠️ Initial apply failed, likely due to existing resources or account limits."
           echo "🔄 Attempting to resolve conflicts..."
           
-          # Set continue on error for imports
+          # Set continue on error for imports and cleanup
           set +e
           
-          # Import existing resources in correct order (dependencies first)
-          echo "🔄 Importing existing resources..."
+          # First, try to release any unused EIPs to free up quota
+          echo "🧹 Cleaning up unused EIPs..."
+          aws ec2 describe-addresses --query 'Addresses[?AssociationId==null].AllocationId' --output text | \
+          xargs -n1 -I {} aws ec2 release-address --allocation-id {} 2>/dev/null || echo "No unused EIPs to release"
           
-          # 1. Import IAM roles first (no dependencies)
-          terraform import 'aws_iam_role.ecs_task_execution' 'automax-dealership-ecs-task-execution-role' 2>/dev/null || echo "Task execution role import skipped"
-          terraform import 'aws_iam_role.ecs_task' 'automax-dealership-ecs-task-role' 2>/dev/null || echo "Task role import skipped"
+          # Handle existing load balancer and target group conflicts
+          echo "🔄 Handling load balancer conflicts..."
           
-          # 2. Import CloudWatch Log Group
-          terraform import 'aws_cloudwatch_log_group.ecs' '/ecs/automax-dealership' 2>/dev/null || echo "Log group import skipped"
-          
-          # 3. Import ALB (before target group)
-          terraform import 'aws_lb.main' 'automax-dealership-alb' 2>/dev/null || echo "ALB import skipped"
-          
-          # 4. Import Target Group and handle listener dependencies
+          # If target group exists and is attached to listener, we need to import both
           TG_ARN=$(aws elbv2 describe-target-groups --names automax-dealership-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || echo "")
           if [ "$TG_ARN" != "" ] && [ "$TG_ARN" != "None" ]; then
-            # Import target group
-            terraform import 'aws_lb_target_group.main' "$TG_ARN" 2>/dev/null || echo "TG import skipped"
+            echo "🔄 Target group exists: $TG_ARN"
             
-            # Get listener ARN and import if exists
-            LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "arn:aws:elasticloadbalancing:us-east-1:*:loadbalancer/app/automax-dealership-alb/*" --query 'Listeners[0].ListenerArn' --output text 2>/dev/null || echo "")
-            if [ "$LISTENER_ARN" != "" ] && [ "$LISTENER_ARN" != "None" ]; then
-              terraform import 'aws_lb_listener.main' "$LISTENER_ARN" 2>/dev/null || echo "Listener import skipped"
+            # Get the load balancer ARN
+            LB_ARN=$(aws elbv2 describe-load-balancers --names automax-dealership-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null || echo "")
+            if [ "$LB_ARN" != "" ] && [ "$LB_ARN" != "None" ]; then
+              echo "🔄 Load balancer exists: $LB_ARN"
+              
+              # Get listener ARN
+              LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "$LB_ARN" --query 'Listeners[0].ListenerArn' --output text 2>/dev/null || echo "")
+              
+              # Import in correct order
+              terraform import 'aws_lb.main' 'automax-dealership-alb' 2>/dev/null || echo "ALB import skipped"
+              terraform import 'aws_lb_target_group.main' "$TG_ARN" 2>/dev/null || echo "TG import skipped"
+              
+              if [ "$LISTENER_ARN" != "" ] && [ "$LISTENER_ARN" != "None" ]; then
+                terraform import 'aws_lb_listener.main' "$LISTENER_ARN" 2>/dev/null || echo "Listener import skipped"
+              fi
             fi
           fi
+          
+          # Import other resources
+          terraform import 'aws_cloudwatch_log_group.ecs' '/ecs/automax-dealership' 2>/dev/null || echo "Log group import skipped"
+          terraform import 'aws_iam_role.ecs_task_execution' 'automax-dealership-ecs-task-execution-role' 2>/dev/null || echo "Task execution role import skipped"
+          terraform import 'aws_iam_role.ecs_task' 'automax-dealership-ecs-task-role' 2>/dev/null || echo "Task role import skipped"
           
           # Re-enable exit on error
           set -e
           
-          echo "🔄 Re-planning after imports..."
+          echo "🔄 Re-planning after imports and cleanup..."
           terraform plan \
             -var="image_uri=${{ needs.build.outputs.image-tag }}" \
             -var="environment=production" \

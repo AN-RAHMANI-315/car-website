@@ -75,44 +75,46 @@ resource "aws_subnet" "public" {
   }
 }
 
-# Private Subnets
-resource "aws_subnet" "private" {
-  count = length(var.private_subnet_cidrs)
+# Private Subnets (Optional - using public subnets for ECS to avoid NAT Gateway costs)
+# Commented out to avoid EIP limits and reduce costs for static website
+# resource "aws_subnet" "private" {
+#   count = length(var.private_subnet_cidrs)
+#
+#   vpc_id            = aws_vpc.main.id
+#   cidr_block        = var.private_subnet_cidrs[count.index]
+#   availability_zone = data.aws_availability_zones.available.names[count.index]
+#
+#   tags = {
+#     Name = "${var.project_name}-private-subnet-${count.index + 1}"
+#     Type = "Private"
+#   }
+# }
 
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = var.private_subnet_cidrs[count.index]
-  availability_zone = data.aws_availability_zones.available.names[count.index]
-
-  tags = {
-    Name = "${var.project_name}-private-subnet-${count.index + 1}"
-    Type = "Private"
-  }
-}
-
-# NAT Gateway
-resource "aws_eip" "nat" {
-  count  = length(aws_subnet.public)
-  domain = "vpc"
-
-  tags = {
-    Name = "${var.project_name}-eip-${count.index + 1}"
-  }
-
-  depends_on = [aws_internet_gateway.main]
-}
-
-resource "aws_nat_gateway" "main" {
-  count = length(aws_subnet.public)
-
-  allocation_id = aws_eip.nat[count.index].id
-  subnet_id     = aws_subnet.public[count.index].id
-
-  tags = {
-    Name = "${var.project_name}-nat-${count.index + 1}"
-  }
-
-  depends_on = [aws_internet_gateway.main]
-}
+# NAT Gateway (Disabled to avoid EIP limits and reduce costs)
+# For static websites, we can run ECS in public subnets with public IPs
+# resource "aws_eip" "nat" {
+#   count  = length(aws_subnet.public)
+#   domain = "vpc"
+#
+#   tags = {
+#     Name = "${var.project_name}-eip-${count.index + 1}"
+#   }
+#
+#   depends_on = [aws_internet_gateway.main]
+# }
+#
+# resource "aws_nat_gateway" "main" {
+#   count = length(aws_subnet.public)
+#
+#   allocation_id = aws_eip.nat[count.index].id
+#   subnet_id     = aws_subnet.public[count.index].id
+#
+#   tags = {
+#     Name = "${var.project_name}-nat-${count.index + 1}"
+#   }
+#
+#   depends_on = [aws_internet_gateway.main]
+# }
 
 # Route Tables
 resource "aws_route_table" "public" {
@@ -128,19 +130,20 @@ resource "aws_route_table" "public" {
   }
 }
 
-resource "aws_route_table" "private" {
-  count  = length(aws_subnet.private)
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main[count.index].id
-  }
-
-  tags = {
-    Name = "${var.project_name}-private-rt-${count.index + 1}"
-  }
-}
+# Private route tables (disabled - using public subnets only)
+# resource "aws_route_table" "private" {
+#   count  = length(aws_subnet.private)
+#   vpc_id = aws_vpc.main.id
+#
+#   route {
+#     cidr_block     = "0.0.0.0/0"
+#     nat_gateway_id = aws_nat_gateway.main[count.index].id
+#   }
+#
+#   tags = {
+#     Name = "${var.project_name}-private-rt-${count.index + 1}"
+#   }
+# }
 
 # Route Table Associations
 resource "aws_route_table_association" "public" {
@@ -150,12 +153,13 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
-resource "aws_route_table_association" "private" {
-  count = length(aws_subnet.private)
-
-  subnet_id      = aws_subnet.private[count.index].id
-  route_table_id = aws_route_table.private[count.index].id
-}
+# Private route table associations (disabled - using public subnets only)
+# resource "aws_route_table_association" "private" {
+#   count = length(aws_subnet.private)
+#
+#   subnet_id      = aws_subnet.private[count.index].id
+#   route_table_id = aws_route_table.private[count.index].id
+# }
 
 # Security Groups
 resource "aws_security_group" "alb" {
@@ -471,8 +475,8 @@ resource "aws_ecs_service" "main" {
 
   network_configuration {
     security_groups  = [aws_security_group.ecs.id]
-    subnets          = aws_subnet.private[*].id
-    assign_public_ip = false
+    subnets          = aws_subnet.public[*].id
+    assign_public_ip = true  # Required when using public subnets
   }
 
   load_balancer {
