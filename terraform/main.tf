@@ -272,26 +272,14 @@ resource "aws_lb_listener" "main" {
   }
 }
 
-# ECR Repository
-resource "aws_ecr_repository" "main" {
-  name                 = var.ecr_repository_name
-  image_tag_mutability = "MUTABLE"
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-
-  encryption_configuration {
-    encryption_type = "AES256"
-  }
-
-  tags = {
-    Name = "${var.project_name}-ecr"
-  }
+# ECR Repository (reference existing repository created by pipeline)
+data "aws_ecr_repository" "main" {
+  name = var.ecr_repository_name
 }
 
+# Optional: ECR Lifecycle Policy for the existing repository
 resource "aws_ecr_lifecycle_policy" "main" {
-  repository = aws_ecr_repository.main.name
+  repository = data.aws_ecr_repository.main.name
 
   policy = jsonencode({
     rules = [
@@ -414,7 +402,7 @@ resource "aws_ecs_task_definition" "main" {
   container_definitions = jsonencode([
     {
       name  = "automax-container"
-      image = var.image_uri != "" ? var.image_uri : "${aws_ecr_repository.main.repository_url}:latest"
+      image = var.image_uri != "" ? var.image_uri : "${data.aws_ecr_repository.main.repository_url}:latest"
       
       portMappings = [
         {

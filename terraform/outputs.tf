@@ -60,12 +60,12 @@ output "ecs_task_definition_arn" {
 # ECR Outputs
 output "ecr_repository_url" {
   description = "URL of the ECR repository"
-  value       = aws_ecr_repository.main.repository_url
+  value       = data.aws_ecr_repository.main.repository_url
 }
 
 output "ecr_repository_arn" {
   description = "ARN of the ECR repository"
-  value       = aws_ecr_repository.main.arn
+  value       = data.aws_ecr_repository.main.arn
 }
 
 # Security Group Outputs
