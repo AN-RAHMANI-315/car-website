@@ -1,0 +1,35 @@
+{
+  "name": "automax-car-dealership",
+  "version": "1.0.0",
+  "description": "AutoMax Car Dealership - A modern static website for car sales",
+  "main": "index.html",
+  "scripts": {
+    "start": "npx http-server . -p 3000 -o",
+    "dev": "npx live-server --port=3000 --open=/index.html",
+    "build": "echo 'Build complete - static files ready for deployment'",
+    "serve": "npx serve . -p 3000"
+  },
+  "keywords": [
+    "car-dealership",
+    "automotive",
+    "static-website",
+    "html",
+    "css",
+    "javascript"
+  ],
+  "author": "AutoMax Team",
+  "license": "MIT",
+  "devDependencies": {
+    "http-server": "^14.1.1",
+    "live-server": "^1.2.2",
+    "serve": "^14.2.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/automax/car-dealership.git"
+  },
+  "bugs": {
+    "url": "https://github.com/automax/car-dealership/issues"
+  },
+  "homepage": "https://github.com/automax/car-dealership#readme"
+}

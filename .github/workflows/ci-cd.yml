@@ -1,0 +1,260 @@
+name: CI/CD Pipeline - AutoMax Car Dealership
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: automax-dealership
+  ECS_SERVICE: automax-service
+  ECS_CLUSTER: automax-cluster
+  ECS_TASK_DEFINITION: automax-task-definition
+
+jobs:
+  # Job 1: Code Quality and Testing
+  test:
+    name: 🧪 Test & Quality Checks
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: 📦 Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest requests beautifulsoup4 html5lib
+
+    - name: 🔍 Lint HTML Files
+      run: |
+        # Install HTML linter
+        npm install -g htmlhint
+        htmlhint index.html
+
+    - name: 🎨 Lint CSS Files
+      run: |
+        # Install CSS linter
+        npm install -g stylelint stylelint-config-standard
+        echo '{"extends": "stylelint-config-standard"}' > .stylelintrc.json
+        stylelint "*.css" || true  # Allow to continue even with warnings
+
+    - name: ⚡ Lint JavaScript Files
+      run: |
+        # Install JS linter
+        npm install -g eslint
+        npx eslint --init --yes || true
+        npx eslint "*.js" || true  # Allow to continue even with warnings
+
+    - name: 🧪 Run Website Tests
+      run: |
+        # Start a simple HTTP server for testing
+        python -m http.server 8000 &
+        sleep 5
+        
+        # Run Python tests
+        export TEST_URL="http://localhost:8000"
+        python -m pytest tests/ -v --tb=short
+
+    - name: 📊 Generate Test Report
+      if: always()
+      run: |
+        echo "Test execution completed"
+        echo "Timestamp: $(date)"
+
+  # Job 2: Build and Push Docker Image
+  build:
+    name: 🐳 Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: 🔐 Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: 🔑 Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: 🏷️ Extract Metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: 🛠️ Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: 🐳 Build and Push Docker Image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: 🔍 Scan Image for Vulnerabilities
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: 📋 Upload Trivy Scan Results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # Job 3: Deploy Infrastructure with Terraform
+  deploy-infrastructure:
+    name: 🚀 Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: [test, build]
+    if: github.ref == 'refs/heads/main'
+    
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: 🔐 Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: ⚙️ Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.6.0
+
+    - name: 🔧 Terraform Init
+      run: terraform init
+
+    - name: 📋 Terraform Plan
+      run: |
+        terraform plan \
+          -var="image_uri=${{ needs.build.outputs.image-tag }}" \
+          -var="environment=production" \
+          -out=tfplan
+
+    - name: 🚀 Terraform Apply
+      run: terraform apply -auto-approve tfplan
+
+    - name: 📤 Output Infrastructure Info
+      run: |
+        echo "Load Balancer DNS: $(terraform output -raw load_balancer_dns)"
+        echo "ECS Cluster: $(terraform output -raw ecs_cluster_name)"
+
+  # Job 4: Deploy Application to ECS
+  deploy-application:
+    name: 🎯 Deploy Application
+    runs-on: ubuntu-latest
+    needs: [build, deploy-infrastructure]
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: 🔐 Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: 📋 Download Task Definition
+      run: |
+        aws ecs describe-task-definition \
+          --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+          --query taskDefinition > task-definition.json
+
+    - name: 🔄 Update Task Definition
+      id: task-def
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: task-definition.json
+        container-name: automax-container
+        image: ${{ needs.build.outputs.image-tag }}
+
+    - name: 🚀 Deploy to Amazon ECS
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+      with:
+        task-definition: ${{ steps.task-def.outputs.task-definition }}
+        service: ${{ env.ECS_SERVICE }}
+        cluster: ${{ env.ECS_CLUSTER }}
+        wait-for-service-stability: true
+
+    - name: ✅ Verify Deployment
+      run: |
+        # Wait for deployment to complete
+        sleep 30
+        
+        # Get load balancer URL from Terraform output
+        LB_URL=$(cd terraform && terraform output -raw load_balancer_dns)
+        
+        # Health check
+        echo "Checking application health at: http://$LB_URL/health"
+        curl -f "http://$LB_URL/health" || exit 1
+        
+        echo "🎉 Deployment successful!"
+        echo "Application is available at: http://$LB_URL"
+
+  # Job 5: Post-Deployment Notifications
+  notify:
+    name: 📢 Notify Deployment Status
+    runs-on: ubuntu-latest
+    needs: [deploy-application]
+    if: always()
+
+    steps:
+    - name: 📢 Slack Notification - Success
+      if: ${{ needs.deploy-application.result == 'success' }}
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        text: '🚗 AutoMax Car Dealership deployed successfully!'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: 📢 Slack Notification - Failure
+      if: ${{ needs.deploy-application.result == 'failure' }}
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        text: '❌ AutoMax Car Dealership deployment failed!'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
