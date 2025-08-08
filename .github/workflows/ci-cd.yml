@@ -315,7 +315,7 @@ jobs:
           # If import fails and ALB exists, we need to remove it to avoid conflicts
           if [ "$LB_ARN" != "" ] && [ "$LB_ARN" != "None" ]; then
             echo "❌ ALB import failed. This is the conflict source!"
-            echo "🔄 Attempting to resolve by removing existing ALB..."
+            echo "🔄 Attempting to resolve by removing existing ALB and related resources..."
             
             # Delete listeners first
             LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn "$LB_ARN" --query 'Listeners[].ListenerArn' --output text 2>/dev/null || echo "")
@@ -331,15 +331,52 @@ jobs:
               echo "✅ Existing ALB deleted to resolve conflict"
               echo "⏳ Waiting for deletion to complete..."
               sleep 60
+              
+              # Also clean up orphaned Target Groups after ALB deletion
+              echo "🧹 Cleaning up orphaned Target Groups after ALB deletion..."
+              TG_ARN=$(aws elbv2 describe-target-groups --names automax-dealership-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || echo "")
+              if [ "$TG_ARN" != "" ] && [ "$TG_ARN" != "None" ]; then
+                echo "🔄 Found orphaned Target Group, deleting: $TG_ARN"
+                if aws elbv2 delete-target-group --target-group-arn "$TG_ARN" 2>/dev/null; then
+                  echo "✅ Orphaned Target Group deleted"
+                else
+                  echo "⚠️ Failed to delete Target Group (might be in use)"
+                fi
+                sleep 10
+              fi
             else
               echo "❌ Failed to delete ALB. Manual intervention may be required."
             fi
           fi
         fi
         
-        # 2. Handle Target Group
-        TG_ARN=$(aws elbv2 describe-target-groups --names automax-dealership-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || echo "")
-        import_if_exists "Target Group" "automax-dealership-tg" "$TG_ARN" "aws_lb_target_group.main"
+        # 2. Handle Target Group (only if ALB wasn't deleted above)
+        if [ "$LB_ARN" = "" ] || [ "$LB_ARN" = "None" ]; then
+          echo "🔍 Checking for existing Target Group (since no ALB was found)..."
+          TG_ARN=$(aws elbv2 describe-target-groups --names automax-dealership-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || echo "")
+          
+          if [ "$TG_ARN" != "" ] && [ "$TG_ARN" != "None" ]; then
+            echo "🔄 Found orphaned Target Group, removing before import: $TG_ARN"
+            # Delete orphaned target group
+            if aws elbv2 delete-target-group --target-group-arn "$TG_ARN" 2>/dev/null; then
+              echo "✅ Orphaned Target Group deleted"
+            else
+              echo "⚠️ Failed to delete Target Group, will skip import"
+            fi
+            sleep 10
+          fi
+        else
+          # Try to import Target Group if ALB still exists
+          TG_ARN=$(aws elbv2 describe-target-groups --names automax-dealership-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || echo "")
+          if ! import_if_exists "Target Group" "automax-dealership-tg" "$TG_ARN" "aws_lb_target_group.main"; then
+            # If import fails, delete the conflicting Target Group
+            if [ "$TG_ARN" != "" ] && [ "$TG_ARN" != "None" ]; then
+              echo "❌ Target Group import failed, deleting conflicting resource: $TG_ARN"
+              aws elbv2 delete-target-group --target-group-arn "$TG_ARN" 2>/dev/null && echo "✅ Conflicting Target Group deleted"
+              sleep 10
+            fi
+          fi
+        fi
         
         # 3. Handle CloudWatch Log Group
         LOG_GROUP_NAME="/ecs/automax-dealership"

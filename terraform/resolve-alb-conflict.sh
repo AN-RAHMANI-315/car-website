@@ -26,6 +26,38 @@ check_tf_state() {
     fi
 }
 
+# Function to clean up orphaned resources
+cleanup_orphaned_resources() {
+    echo "🧹 Cleaning up any orphaned resources that might cause conflicts..."
+    
+    # Check for orphaned Target Groups first
+    echo "🔍 Checking for orphaned Target Groups..."
+    local tg_arn
+    tg_arn=$(aws elbv2 describe-target-groups --names "$TG_NAME" --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || echo "")
+    
+    if [ "$tg_arn" != "" ] && [ "$tg_arn" != "None" ]; then
+        # Check if Target Group is associated with any ALB
+        local associated_albs
+        associated_albs=$(aws elbv2 describe-target-groups --target-group-arns "$tg_arn" --query 'TargetGroups[0].LoadBalancerArns' --output text 2>/dev/null || echo "")
+        
+        if [ "$associated_albs" = "" ] || [ "$associated_albs" = "None" ] || [ "$associated_albs" = "[]" ]; then
+            echo "🔄 Found orphaned Target Group (not associated with any ALB): $tg_arn"
+            echo "🗑️ Deleting orphaned Target Group..."
+            
+            if aws elbv2 delete-target-group --target-group-arn "$tg_arn" 2>/dev/null; then
+                echo "✅ Orphaned Target Group deleted"
+                sleep 10
+            else
+                echo "⚠️ Failed to delete orphaned Target Group"
+            fi
+        else
+            echo "ℹ️ Target Group is associated with ALB(s): $associated_albs"
+        fi
+    else
+        echo "ℹ️ No Target Group found with name: $TG_NAME"
+    fi
+}
+
 # Function to safely import or remove resource
 handle_alb_conflict() {
     echo "🔍 Checking for ALB conflict..."
@@ -78,7 +110,22 @@ import_related_resources() {
     if [ "$tg_arn" != "" ] && [ "$tg_arn" != "None" ]; then
         if ! check_tf_state "aws_lb_target_group.main"; then
             echo "🔄 Importing target group..."
-            terraform import 'aws_lb_target_group.main' "$tg_arn" 2>/dev/null && echo "✅ Target group imported" || echo "⚠️ Target group import failed"
+            if terraform import 'aws_lb_target_group.main' "$tg_arn" 2>/dev/null; then
+                echo "✅ Target group imported"
+            else
+                echo "❌ Target group import failed"
+                echo "🔄 Checking if Target Group is orphaned or misconfigured..."
+                
+                # If import fails, it might be orphaned or misconfigured
+                # Delete it so Terraform can create a new one
+                echo "🗑️ Deleting problematic Target Group to allow fresh creation..."
+                if aws elbv2 delete-target-group --target-group-arn "$tg_arn" 2>/dev/null; then
+                    echo "✅ Problematic Target Group deleted"
+                    sleep 10
+                else
+                    echo "⚠️ Failed to delete Target Group"
+                fi
+            fi
         fi
     fi
     
@@ -97,7 +144,7 @@ import_related_resources() {
 remove_existing_alb() {
     local lb_arn=$1
     
-    echo "🗑️ Removing existing ALB to resolve conflict..."
+    echo "🗑️ Removing existing ALB and ALL related resources to resolve conflict..."
     
     # Get and delete all listeners first
     local listeners
@@ -128,14 +175,35 @@ remove_existing_alb() {
         while [ $wait_time -lt $max_wait ]; do
             if ! aws elbv2 describe-load-balancers --names "$ALB_NAME" &>/dev/null; then
                 echo "✅ ALB deletion confirmed"
-                return 0
+                break
             fi
             sleep 10
             wait_time=$((wait_time + 10))
             echo "⏳ Still waiting... ($wait_time/${max_wait}s)"
         done
         
-        echo "⚠️ ALB deletion taking longer than expected, but initiated"
+        # Clean up orphaned Target Groups after ALB deletion
+        echo "🧹 Cleaning up orphaned Target Groups..."
+        local tg_arn
+        tg_arn=$(aws elbv2 describe-target-groups --names "$TG_NAME" --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || echo "")
+        
+        if [ "$tg_arn" != "" ] && [ "$tg_arn" != "None" ]; then
+            echo "🔄 Found orphaned Target Group after ALB deletion: $tg_arn"
+            echo "🗑️ Deleting orphaned Target Group..."
+            
+            if aws elbv2 delete-target-group --target-group-arn "$tg_arn" 2>/dev/null; then
+                echo "✅ Orphaned Target Group deleted"
+                
+                # Wait for Target Group deletion
+                sleep 15
+                echo "✅ Target Group cleanup completed"
+            else
+                echo "⚠️ Failed to delete orphaned Target Group"
+            fi
+        else
+            echo "ℹ️ No orphaned Target Groups found"
+        fi
+        
         return 0
     else
         echo "❌ Failed to delete ALB"
@@ -157,6 +225,9 @@ if [ ! -d ".terraform" ]; then
     echo "🔧 Initializing Terraform..."
     terraform init
 fi
+
+# First, clean up any orphaned resources
+cleanup_orphaned_resources
 
 # Handle the ALB conflict
 if handle_alb_conflict; then
