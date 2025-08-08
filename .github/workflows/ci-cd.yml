@@ -1000,18 +1000,36 @@ jobs:
     if: always()
 
     steps:
-    - name: 📢 Slack Notification - Success
+    - name: 📢 Deployment Notification - Success
+      if: ${{ needs.deploy-application.result == 'success' }}
+      run: |
+        echo "🎉 SUCCESS: AutoMax Car Dealership deployed successfully!"
+        echo "✅ All deployment steps completed successfully"
+        echo "🌐 Your application should now be available via the Load Balancer"
+
+    - name: 📢 Deployment Notification - Failure
+      if: ${{ needs.deploy-application.result == 'failure' }}
+      run: |
+        echo "❌ FAILURE: AutoMax Car Dealership deployment failed!"
+        echo "🔍 Check the logs above for detailed error information"
+        echo "💡 Common issues: Target Group conflicts, infrastructure timing, or resource limits"
+
+    - name: 📢 Slack Notification - Success (Optional)
       if: ${{ needs.deploy-application.result == 'success' }}
       uses: 8398a7/action-slack@v3
       with:
         status: success
         text: '🚗 AutoMax Car Dealership deployed successfully!'
-        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      continue-on-error: true
 
-    - name: 📢 Slack Notification - Failure
+    - name: 📢 Slack Notification - Failure (Optional)
       if: ${{ needs.deploy-application.result == 'failure' }}
       uses: 8398a7/action-slack@v3
       with:
         status: failure
         text: '❌ AutoMax Car Dealership deployment failed!'
-        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      continue-on-error: true
