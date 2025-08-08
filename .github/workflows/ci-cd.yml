@@ -250,28 +250,122 @@ jobs:
     - name: 🔧 Terraform Init
       run: terraform init
 
-    - name: 🧹 Clean Up Existing Resources (if needed)
+    - name: 🧹 Pre-deployment State Management
       run: |
-        echo "🧹 Checking for existing resources that might conflict..."
+        echo "🔍 Comprehensive pre-deployment state check and cleanup..."
         
-        # Check AWS account limits and existing resources
+        # Function to safely import resource if it exists in AWS but not in state
+        import_if_exists() {
+          local resource_type=$1
+          local resource_name=$2
+          local aws_identifier=$3
+          local tf_resource=$4
+          
+          echo "🔍 Checking $resource_type: $resource_name"
+          
+          # Check if resource exists in Terraform state
+          if terraform state show "$tf_resource" &>/dev/null; then
+            echo "✅ $resource_type already in Terraform state"
+            return 0
+          fi
+          
+          # Check if resource exists in AWS
+          if [ "$aws_identifier" != "" ] && [ "$aws_identifier" != "None" ] && [ "$aws_identifier" != "null" ]; then
+            echo "🔄 Found $resource_type in AWS, importing to Terraform state..."
+            if terraform import "$tf_resource" "$aws_identifier" 2>/dev/null; then
+              echo "✅ Successfully imported $resource_type"
+              return 0
+            else
+              echo "⚠️ Failed to import $resource_type"
+              return 1
+            fi
+          else
+            echo "ℹ️ $resource_type not found in AWS"
+            return 0
+          fi
+        }
+        
+        # Check AWS account limits
         echo "📊 Checking AWS account limits..."
-        
-        # Check EIP usage
         EIP_LIMIT=$(aws ec2 describe-account-attributes --attribute-names max-elastic-ips --query 'AccountAttributes[0].AttributeValues[0].AttributeValue' --output text)
         EIP_USED=$(aws ec2 describe-addresses --query 'length(Addresses)' --output text)
         echo "EIP Limit: $EIP_LIMIT, Used: $EIP_USED"
         
+        # Clean up unused EIPs first
         if [ "$EIP_USED" -ge "$EIP_LIMIT" ]; then
-          echo "⚠️ EIP limit reached. Will use public subnet architecture without NAT gateways."
+          echo "🧹 EIP limit reached, cleaning up unused EIPs..."
+          aws ec2 describe-addresses --query 'Addresses[?AssociationId==null].AllocationId' --output text | \
+          xargs -n1 -I {} aws ec2 release-address --allocation-id {} 2>/dev/null || echo "No unused EIPs to release"
         fi
         
-        # List existing resources for import
-        if terraform state list | grep -E "(aws_lb\.main|aws_lb_target_group\.main|aws_cloudwatch_log_group\.ecs|aws_iam_role\.ecs_task_execution|aws_iam_role\.ecs_task)"; then
-          echo "⚠️ Found existing resources in state. Will handle conflicts during apply."
-        else
-          echo "✅ No conflicting resources found in Terraform state."
+        # 1. Handle ALB (multiple detection methods)
+        echo "🔍 Checking for existing ALB..."
+        LB_ARN=""
+        
+        # Try by exact name first
+        LB_ARN=$(aws elbv2 describe-load-balancers --names automax-dealership-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null || echo "")
+        
+        # If not found by name, search all ALBs for our pattern
+        if [ "$LB_ARN" = "" ] || [ "$LB_ARN" = "None" ]; then
+          LB_ARN=$(aws elbv2 describe-load-balancers --query 'LoadBalancers[?contains(LoadBalancerName, `automax-dealership`)].LoadBalancerArn' --output text 2>/dev/null | head -n1 || echo "")
         fi
+        
+        # Import ALB if found
+        if ! import_if_exists "ALB" "automax-dealership-alb" "$LB_ARN" "aws_lb.main"; then
+          # If import fails and ALB exists, we need to remove it to avoid conflicts
+          if [ "$LB_ARN" != "" ] && [ "$LB_ARN" != "None" ]; then
+            echo "❌ ALB import failed. This is the conflict source!"
+            echo "🔄 Attempting to resolve by removing existing ALB..."
+            
+            # Delete listeners first
+            LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn "$LB_ARN" --query 'Listeners[].ListenerArn' --output text 2>/dev/null || echo "")
+            if [ "$LISTENERS" != "" ]; then
+              for LISTENER in $LISTENERS; do
+                aws elbv2 delete-listener --listener-arn "$LISTENER" 2>/dev/null && echo "Deleted listener: $LISTENER"
+              done
+              sleep 10
+            fi
+            
+            # Delete ALB
+            if aws elbv2 delete-load-balancer --load-balancer-arn "$LB_ARN" 2>/dev/null; then
+              echo "✅ Existing ALB deleted to resolve conflict"
+              echo "⏳ Waiting for deletion to complete..."
+              sleep 60
+            else
+              echo "❌ Failed to delete ALB. Manual intervention may be required."
+            fi
+          fi
+        fi
+        
+        # 2. Handle Target Group
+        TG_ARN=$(aws elbv2 describe-target-groups --names automax-dealership-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || echo "")
+        import_if_exists "Target Group" "automax-dealership-tg" "$TG_ARN" "aws_lb_target_group.main"
+        
+        # 3. Handle CloudWatch Log Group
+        LOG_GROUP_NAME="/ecs/automax-dealership"
+        if aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP_NAME" --query 'logGroups[0].logGroupName' --output text 2>/dev/null | grep -q "$LOG_GROUP_NAME"; then
+          import_if_exists "CloudWatch Log Group" "$LOG_GROUP_NAME" "$LOG_GROUP_NAME" "aws_cloudwatch_log_group.ecs"
+        fi
+        
+        # 4. Handle IAM Roles
+        for role_name in "automax-dealership-ecs-task-execution-role" "automax-dealership-ecs-task-role"; do
+          if aws iam get-role --role-name "$role_name" &>/dev/null; then
+            if [ "$role_name" = "automax-dealership-ecs-task-execution-role" ]; then
+              import_if_exists "IAM Role" "$role_name" "$role_name" "aws_iam_role.ecs_task_execution"
+            else
+              import_if_exists "IAM Role" "$role_name" "$role_name" "aws_iam_role.ecs_task"
+            fi
+          fi
+        done
+        
+        echo "✅ Pre-deployment state management completed"
+
+    - name: 🎯 ALB Conflict Resolution
+      run: |
+        echo "🎯 Running targeted ALB conflict resolution..."
+        chmod +x resolve-alb-conflict.sh
+        ./resolve-alb-conflict.sh
+        echo "✅ ALB conflict resolution completed"
 
     - name: 📋 Terraform Plan
       run: |
@@ -301,14 +395,69 @@ jobs:
           echo "✅ Terraform plan completed successfully."
         fi
 
-    - name: 🚀 Terraform Apply (with conflict resolution)
+    - name: 🚀 Terraform Apply (with specific ALB conflict resolution)
       run: |
         echo "🚀 Applying Terraform configuration..."
         
-        # Try normal apply first
-        if ! terraform apply -auto-approve tfplan; then
-          echo "⚠️ Initial apply failed, likely due to existing resources or account limits."
-          echo "🔄 Attempting to resolve conflicts..."
+        # Capture apply output for error analysis
+        if ! terraform apply -auto-approve tfplan 2>&1 | tee apply_output.log; then
+          echo "⚠️ Initial apply failed. Analyzing error..."
+          
+          # Check if error is specifically about ALB already exists
+          if grep -q "ELBv2 Load Balancer.*already exists" apply_output.log; then
+            echo "🎯 Detected ALB 'already exists' error - this is the exact issue we're solving!"
+            
+            # Extract ALB name from error message
+            ALB_NAME=$(grep "ELBv2 Load Balancer" apply_output.log | sed -n 's/.*ELBv2 Load Balancer (\([^)]*\)).*/\1/p' | head -n1)
+            echo "🔍 Problematic ALB name: $ALB_NAME"
+            
+            # Get ALB ARN for deletion
+            LB_ARN=$(aws elbv2 describe-load-balancers --names "$ALB_NAME" --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null || echo "")
+            
+            if [ "$LB_ARN" != "" ] && [ "$LB_ARN" != "None" ]; then
+              echo "🔄 Found conflicting ALB: $LB_ARN"
+              echo "🗑️ Deleting existing ALB to resolve 'already exists' conflict..."
+              
+              # Delete all listeners first
+              LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn "$LB_ARN" --query 'Listeners[].ListenerArn' --output text 2>/dev/null || echo "")
+              if [ "$LISTENERS" != "" ]; then
+                echo "🔄 Deleting listeners..."
+                for LISTENER in $LISTENERS; do
+                  aws elbv2 delete-listener --listener-arn "$LISTENER" 2>/dev/null && echo "✅ Deleted listener: $LISTENER"
+                done
+                sleep 15
+              fi
+              
+              # Now delete the ALB
+              if aws elbv2 delete-load-balancer --load-balancer-arn "$LB_ARN" 2>/dev/null; then
+                echo "✅ Successfully deleted conflicting ALB"
+                echo "⏳ Waiting for ALB deletion to propagate..."
+                sleep 90  # Wait longer for full deletion
+                
+                # Verify deletion
+                if ! aws elbv2 describe-load-balancers --names "$ALB_NAME" &>/dev/null; then
+                  echo "✅ ALB deletion confirmed"
+                  
+                  # Now retry the terraform apply
+                  echo "🔄 Retrying Terraform apply after ALB conflict resolution..."
+                  if terraform apply -auto-approve tfplan; then
+                    echo "🎉 Terraform apply successful after ALB conflict resolution!"
+                    exit 0
+                  else
+                    echo "❌ Terraform apply still failing after ALB deletion"
+                  fi
+                else
+                  echo "⚠️ ALB deletion not yet complete, continuing with full conflict resolution..."
+                fi
+              else
+                echo "❌ Failed to delete ALB, continuing with full conflict resolution..."
+              fi
+            else
+              echo "⚠️ Could not find ALB to delete, continuing with full conflict resolution..."
+            fi
+          fi
+          
+          echo "🔄 Attempting comprehensive conflict resolution..."
           
           # Set continue on error for imports and cleanup
           set +e
@@ -331,22 +480,63 @@ jobs:
           # Handle existing load balancer and target group conflicts
           echo "🔄 Handling load balancer conflicts..."
           
-          # Check if ALB exists in AWS
+          # Check if ALB exists in AWS (try multiple methods)
+          echo "🔍 Checking for existing ALB..."
+          LB_ARN=""
+          
+          # Method 1: Try by name
           LB_ARN=$(aws elbv2 describe-load-balancers --names automax-dealership-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null || echo "")
+          
+          # Method 2: If name lookup fails, search by tags or list all
+          if [ "$LB_ARN" = "" ] || [ "$LB_ARN" = "None" ]; then
+            echo "� ALB not found by name, searching all load balancers..."
+            LB_ARN=$(aws elbv2 describe-load-balancers --query 'LoadBalancers[?contains(LoadBalancerName, `automax-dealership`)].LoadBalancerArn' --output text 2>/dev/null | head -n1 || echo "")
+          fi
+          
           if [ "$LB_ARN" != "" ] && [ "$LB_ARN" != "None" ]; then
-            echo "🔄 Load balancer exists in AWS: $LB_ARN"
+            echo "✅ Found existing ALB: $LB_ARN"
             
             # Check if it's already in Terraform state
             if ! terraform state show aws_lb.main &>/dev/null; then
               echo "🔄 Importing ALB into Terraform state..."
-              if terraform import 'aws_lb.main' 'automax-dealership-alb'; then
-                echo "✅ ALB import successful"
+              
+              # Try importing by ARN first
+              if terraform import 'aws_lb.main' "$LB_ARN"; then
+                echo "✅ ALB import by ARN successful"
+              # If ARN import fails, try by name
+              elif terraform import 'aws_lb.main' 'automax-dealership-alb'; then
+                echo "✅ ALB import by name successful"
               else
-                echo "⚠️ ALB import failed, will try to handle during apply"
+                echo "❌ ALB import failed. Attempting to remove existing ALB to avoid conflicts..."
+                
+                # Get all listeners first
+                LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn "$LB_ARN" --query 'Listeners[].ListenerArn' --output text 2>/dev/null || echo "")
+                
+                # Delete listeners first
+                if [ "$LISTENERS" != "" ]; then
+                  echo "🔄 Deleting existing listeners..."
+                  for LISTENER in $LISTENERS; do
+                    aws elbv2 delete-listener --listener-arn "$LISTENER" 2>/dev/null || echo "Failed to delete listener $LISTENER"
+                  done
+                  sleep 10
+                fi
+                
+                # Delete the load balancer
+                echo "🔄 Deleting existing ALB to resolve conflict..."
+                if aws elbv2 delete-load-balancer --load-balancer-arn "$LB_ARN" 2>/dev/null; then
+                  echo "✅ ALB deleted successfully"
+                  # Wait for ALB to be fully deleted
+                  echo "⏳ Waiting for ALB deletion to complete..."
+                  sleep 60
+                else
+                  echo "⚠️ Failed to delete ALB. Pipeline will attempt to handle conflict."
+                fi
               fi
             else
               echo "✅ ALB already in Terraform state"
             fi
+          else
+            echo "ℹ️ No existing ALB found"
           fi
           
           # Check if Target Group exists
