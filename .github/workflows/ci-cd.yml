@@ -9,9 +9,9 @@ on:
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: automax-dealership
-  ECS_SERVICE: automax-service
-  ECS_CLUSTER: automax-cluster
-  ECS_TASK_DEFINITION: automax-task-definition
+  ECS_SERVICE: automax-dealership-service
+  ECS_CLUSTER: automax-dealership-cluster
+  ECS_TASK_DEFINITION: automax-dealership-task-definition
 
 jobs:
   # Job 1: Code Quality and Testing
@@ -689,6 +689,42 @@ jobs:
         echo "Load Balancer DNS: $(terraform output -raw load_balancer_dns)"
         echo "ECS Cluster: $(terraform output -raw ecs_cluster_name)"
 
+    - name: ✅ Verify Infrastructure Readiness
+      run: |
+        echo "🔍 Verifying that all infrastructure components are ready..."
+        
+        # Verify ECS Cluster
+        CLUSTER_NAME=$(terraform output -raw ecs_cluster_name)
+        echo "🔍 Verifying ECS cluster: $CLUSTER_NAME"
+        if aws ecs describe-clusters --clusters "$CLUSTER_NAME" --query 'clusters[0].status' --output text | grep -q "ACTIVE"; then
+          echo "✅ ECS cluster is active"
+        else
+          echo "❌ ECS cluster is not active"
+          exit 1
+        fi
+        
+        # Verify ECS Service
+        SERVICE_NAME=$(terraform output -raw ecs_service_name)
+        echo "🔍 Verifying ECS service: $SERVICE_NAME"
+        if aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" --query 'services[0].serviceName' --output text 2>/dev/null | grep -q "$SERVICE_NAME"; then
+          echo "✅ ECS service exists"
+        else
+          echo "❌ ECS service not found"
+          exit 1
+        fi
+        
+        # Verify ALB
+        ALB_DNS=$(terraform output -raw load_balancer_dns)
+        echo "🔍 Verifying ALB: $ALB_DNS"
+        if [ "$ALB_DNS" != "" ] && [ "$ALB_DNS" != "null" ]; then
+          echo "✅ ALB is ready"
+        else
+          echo "❌ ALB DNS not available"
+          exit 1
+        fi
+        
+        echo "🎉 All infrastructure components are ready for application deployment!"
+
   # Job 5: Deploy Application to ECS
   deploy-application:
     name: 🎯 Deploy Application
@@ -711,11 +747,15 @@ jobs:
       run: |
         echo "🔍 Checking if task definition exists..."
         
+        # Get the actual task definition name from the environment (now corrected)
+        TASK_DEF_NAME="${{ env.ECS_TASK_DEFINITION }}"
+        echo "🔍 Looking for task definition: $TASK_DEF_NAME"
+        
         # Check if task definition exists
-        if aws ecs describe-task-definition --task-definition ${{ env.ECS_TASK_DEFINITION }} &>/dev/null; then
+        if aws ecs describe-task-definition --task-definition "$TASK_DEF_NAME" &>/dev/null; then
           echo "✅ Task definition exists, downloading current version..."
           aws ecs describe-task-definition \
-            --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+            --task-definition "$TASK_DEF_NAME" \
             --query taskDefinition > task-definition.json
         else
           echo "⚠️ Task definition doesn't exist yet (first deployment)"
@@ -725,10 +765,10 @@ jobs:
           sleep 30
           
           # Try again
-          if aws ecs describe-task-definition --task-definition ${{ env.ECS_TASK_DEFINITION }} &>/dev/null; then
+          if aws ecs describe-task-definition --task-definition "$TASK_DEF_NAME" &>/dev/null; then
             echo "✅ Task definition now exists, downloading..."
             aws ecs describe-task-definition \
-              --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+              --task-definition "$TASK_DEF_NAME" \
               --query taskDefinition > task-definition.json
           else
             echo "❌ Task definition still not found. This might be a first deployment."
@@ -759,12 +799,57 @@ jobs:
     - name: 🎯 Deploy to Amazon ECS (First Deployment)
       if: steps.check-task-def.outputs.first-deployment == 'true'
       run: |
-        echo "🎯 First deployment detected - triggering ECS service update..."
+        echo "🎯 First deployment detected - verifying ECS infrastructure..."
         
-        # Force new deployment to pick up the Terraform-created task definition
+        # Get the actual resource names from Terraform outputs
+        cd terraform
+        CLUSTER_NAME=$(terraform output -raw ecs_cluster_name)
+        SERVICE_NAME=$(terraform output -raw ecs_service_name)
+        cd ..
+        
+        echo "🔍 Using Terraform-created resources:"
+        echo "  Cluster: $CLUSTER_NAME"
+        echo "  Service: $SERVICE_NAME"
+        
+        # First, verify that the ECS cluster exists
+        echo "🔍 Checking if ECS cluster exists..."
+        if ! aws ecs describe-clusters --clusters "$CLUSTER_NAME" --query 'clusters[0].clusterName' --output text 2>/dev/null | grep -q "$CLUSTER_NAME"; then
+          echo "❌ ECS cluster not found: $CLUSTER_NAME"
+          echo "🔄 This might be a Terraform timing issue. Waiting for cluster creation..."
+          sleep 30
+          
+          # Check again
+          if ! aws ecs describe-clusters --clusters "$CLUSTER_NAME" --query 'clusters[0].clusterName' --output text 2>/dev/null | grep -q "$CLUSTER_NAME"; then
+            echo "❌ ECS cluster still not found after waiting. Terraform may have failed to create it."
+            echo "🔍 Listing all available clusters:"
+            aws ecs list-clusters --query 'clusterArns' --output table || echo "No clusters found"
+            exit 1
+          fi
+        fi
+        echo "✅ ECS cluster found: $CLUSTER_NAME"
+        
+        # Next, verify that the ECS service exists
+        echo "🔍 Checking if ECS service exists..."
+        if ! aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" --query 'services[0].serviceName' --output text 2>/dev/null | grep -q "$SERVICE_NAME"; then
+          echo "❌ ECS service not found: $SERVICE_NAME"
+          echo "🔄 This might be a Terraform timing issue. Waiting for service creation..."
+          sleep 30
+          
+          # Check again
+          if ! aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" --query 'services[0].serviceName' --output text 2>/dev/null | grep -q "$SERVICE_NAME"; then
+            echo "❌ ECS service still not found after waiting. Terraform may have failed to create it."
+            echo "🔍 Listing all services in cluster:"
+            aws ecs list-services --cluster "$CLUSTER_NAME" --query 'serviceArns' --output table || echo "No services found"
+            exit 1
+          fi
+        fi
+        echo "✅ ECS service found: $SERVICE_NAME"
+        
+        # Now safely trigger the service update
+        echo "🚀 Triggering ECS service update..."
         aws ecs update-service \
-          --cluster ${{ env.ECS_CLUSTER }} \
-          --service ${{ env.ECS_SERVICE }} \
+          --cluster "$CLUSTER_NAME" \
+          --service "$SERVICE_NAME" \
           --force-new-deployment
         
         echo "✅ ECS service deployment triggered"
@@ -772,8 +857,8 @@ jobs:
         # Wait for deployment to complete
         echo "⏳ Waiting for service to stabilize..."
         aws ecs wait services-stable \
-          --cluster ${{ env.ECS_CLUSTER }} \
-          --services ${{ env.ECS_SERVICE }}
+          --cluster "$CLUSTER_NAME" \
+          --services "$SERVICE_NAME"
         
         echo "✅ ECS service deployment completed"
 
