@@ -25,9 +25,9 @@ variable "vpc_cidr" {
 }
 
 variable "public_subnet_cidrs" {
-  description = "CIDR blocks for public subnets (Free Tier: Single AZ to minimize costs)"
+  description = "CIDR blocks for public subnets (ALB requires minimum 2 AZs)"
   type        = list(string)
-  default     = ["10.0.1.0/24"]  # Single subnet for free tier
+  default     = ["10.0.1.0/24", "10.0.2.0/24"]  # 2 subnets required for ALB
 }
 
 variable "private_subnet_cidrs" {

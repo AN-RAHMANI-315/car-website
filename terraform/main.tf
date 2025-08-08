@@ -227,13 +227,14 @@ resource "aws_security_group" "ecs" {
 }
 
 # Application Load Balancer - Check if exists, create if not
-# AWS Free Tier: ALB provides 750 hours/month for 12 months (more than enough for 24/7)
+# AWS Requirement: ALB needs minimum 2 subnets in different AZs for high availability
+# Free Tier: ALB provides 750 hours/month for 12 months (more than enough for 24/7)
 resource "aws_lb" "main" {
   name               = "${var.project_name}-alb"
   internal           = false
   load_balancer_type = "application"  # Free tier eligible
   security_groups    = [aws_security_group.alb.id]
-  subnets            = aws_subnet.public[*].id
+  subnets            = aws_subnet.public[*].id  # Requires 2+ subnets in different AZs
 
   enable_deletion_protection = false
 

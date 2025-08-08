@@ -49,9 +49,10 @@
 
 ## 🔧 **Free Tier Optimizations Applied:**
 
-### **1. Single AZ Configuration**
-- **Before**: 2 Availability Zones (higher costs)
-- **After**: 1 Availability Zone (minimized costs)
+### **1. Multi-AZ Configuration (ALB Requirement)**
+- **ALB Requirement**: Minimum 2 Availability Zones (AWS requirement)
+- **Free Tier Impact**: Minimal - subnets are free, only affects ECS placement
+- **ECS Strategy**: Still run 1 task, but can be placed in either AZ
 
 ### **2. No NAT Gateways**
 - **Savings**: $45-60/month per NAT Gateway
