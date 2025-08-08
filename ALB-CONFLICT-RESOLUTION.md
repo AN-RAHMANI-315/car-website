@@ -2,23 +2,28 @@
 
 ## 🚨 Problem Description
 
-You're encountering this error for the **third time**:
+You're encountering recurring AWS resource conflicts:
 
+### Latest Issue (Current):
 ```
-Error: ELBv2 Load Balancer (automax-dealership-alb) already exists
-│ 
-│   with aws_lb.main,
-│   on main.tf line 232, in resource "aws_lb" "main":
-│  232: resource "aws_lb" "main" {
+Error: Terraform exited with code 1.
+⚠️ Failed to import CloudWatch Log Group
+```
+
+### Previous Issues (Resolved):
+```
+Error: ELBv2 Load Balancer (automax-dealership-alb) already exists ✅ RESOLVED
+Error: Failed to import Target Group ✅ RESOLVED
 ```
 
 ## 🔍 Root Cause Analysis
 
-This error occurs when:
-1. **ALB exists in AWS** but **not in Terraform state**
-2. **Previous deployments** left orphaned ALB resources
-3. **Terraform import** attempts failed or were incomplete
+These errors occur when:
+1. **AWS resources exist** but **not in Terraform state**
+2. **Previous deployments** left orphaned resources
+3. **Terraform import** attempts fail due to configuration mismatches
 4. **Resource conflicts** between multiple deployment attempts
+5. **Sequential failures** cascade through related resources
 
 ## ✅ Comprehensive Solution Implementation
 
@@ -32,7 +37,7 @@ This script specifically:
 - ✅ Detects ALB existence in AWS vs Terraform state
 - ✅ Attempts to import existing ALB into Terraform state
 - ✅ Falls back to removing conflicting ALB if import fails
-- ✅ Handles related resources (target groups, listeners)
+- ✅ Handles related resources (target groups, listeners, **CloudWatch log groups**)
 - ✅ Provides detailed logging and feedback
 
 ### 2. 🔧 Enhanced CI/CD Pipeline
@@ -42,21 +47,25 @@ This script specifically:
 #### Layer 1: Pre-deployment State Management
 - Comprehensive resource existence checking
 - Automatic import attempts for all conflicting resources
+- **Enhanced CloudWatch Log Group handling**
 - AWS account limit checks and cleanup
 
 #### Layer 2: Targeted ALB Conflict Resolution
 - Runs the dedicated script before Terraform plan
 - Specifically addresses ALB "already exists" errors
+- **Orphaned resource cleanup** (Target Groups, Log Groups)
 - Ensures clean state before deployment
 
 #### Layer 3: Intelligent Apply Error Handling
 - Detects ALB "already exists" errors in real-time
-- Extracts ALB name from error messages
-- Automatically deletes conflicting ALB and retries
+- **Detects CloudWatch Log Group import failures**
+- Extracts resource names from error messages
+- Automatically deletes conflicting resources and retries
 
 #### Layer 4: Comprehensive Fallback Import Logic
 - Multiple resource detection methods
 - Robust import logic for all AWS resources
+- **Enhanced error handling** for import failures
 - Graceful degradation when imports fail
 
 ### 3. 🛠️ Manual Resolution Options
@@ -68,34 +77,56 @@ If the automated solution doesn't work, you can manually resolve this:
 cd terraform/
 terraform init
 
-# Get ALB ARN
-ALB_ARN=$(aws elbv2 describe-load-balancers --names automax-dealership-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+# Get ALB ARN (if ALB still exists)
+ALB_ARN=$(aws elbv2 describe-load-balancers --names automax-dealership-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null)
 
-# Import ALB
-terraform import aws_lb.main automax-dealership-alb
+# Import ALB (if exists)
+if [ "$ALB_ARN" != "" ] && [ "$ALB_ARN" != "None" ]; then
+  terraform import aws_lb.main automax-dealership-alb
+fi
 
 # Import related resources
-TG_ARN=$(aws elbv2 describe-target-groups --names automax-dealership-tg --query 'TargetGroups[0].TargetGroupArn' --output text)
-terraform import aws_lb_target_group.main $TG_ARN
+TG_ARN=$(aws elbv2 describe-target-groups --names automax-dealership-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null)
+if [ "$TG_ARN" != "" ] && [ "$TG_ARN" != "None" ]; then
+  terraform import aws_lb_target_group.main $TG_ARN
+fi
 
-LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn $ALB_ARN --query 'Listeners[0].ListenerArn' --output text)
-terraform import aws_lb_listener.main $LISTENER_ARN
+# Import CloudWatch Log Group
+if aws logs describe-log-groups --log-group-name-prefix "/ecs/automax-dealership" | grep -q "/ecs/automax-dealership"; then
+  terraform import aws_cloudwatch_log_group.ecs "/ecs/automax-dealership"
+fi
+
+# Import Listener (if ALB exists)
+if [ "$ALB_ARN" != "" ] && [ "$ALB_ARN" != "None" ]; then
+  LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn $ALB_ARN --query 'Listeners[0].ListenerArn' --output text 2>/dev/null)
+  if [ "$LISTENER_ARN" != "" ] && [ "$LISTENER_ARN" != "None" ]; then
+    terraform import aws_lb_listener.main $LISTENER_ARN
+  fi
+fi
 ```
 
-#### Option B: Manual Cleanup (Last Resort)
+#### Option B: Manual Cleanup (Current Approach)
 ```bash
-# Get ALB ARN
-ALB_ARN=$(aws elbv2 describe-load-balancers --names automax-dealership-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+# Delete CloudWatch Log Group
+aws logs delete-log-group --log-group-name "/ecs/automax-dealership"
 
-# Delete listeners first
-aws elbv2 describe-listeners --load-balancer-arn $ALB_ARN --query 'Listeners[].ListenerArn' --output text | \
-xargs -n1 aws elbv2 delete-listener --listener-arn
+# Delete Target Group (if orphaned)
+TG_ARN=$(aws elbv2 describe-target-groups --names automax-dealership-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null)
+if [ "$TG_ARN" != "" ] && [ "$TG_ARN" != "None" ]; then
+  aws elbv2 delete-target-group --target-group-arn $TG_ARN
+fi
 
-# Wait a bit
-sleep 10
-
-# Delete ALB
-aws elbv2 delete-load-balancer --load-balancer-arn $ALB_ARN
+# Delete ALB (if still exists)
+ALB_ARN=$(aws elbv2 describe-load-balancers --names automax-dealership-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null)
+if [ "$ALB_ARN" != "" ] && [ "$ALB_ARN" != "None" ]; then
+  # Delete listeners first
+  aws elbv2 describe-listeners --load-balancer-arn $ALB_ARN --query 'Listeners[].ListenerArn' --output text | \
+  xargs -n1 aws elbv2 delete-listener --listener-arn
+  
+  # Wait and delete ALB
+  sleep 10
+  aws elbv2 delete-load-balancer --load-balancer-arn $ALB_ARN
+fi
 
 # Wait for deletion
 sleep 60

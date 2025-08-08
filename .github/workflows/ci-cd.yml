@@ -380,18 +380,41 @@ jobs:
         
         # 3. Handle CloudWatch Log Group
         LOG_GROUP_NAME="/ecs/automax-dealership"
+        echo "🔍 Checking for existing CloudWatch Log Group..."
         if aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP_NAME" --query 'logGroups[0].logGroupName' --output text 2>/dev/null | grep -q "$LOG_GROUP_NAME"; then
-          import_if_exists "CloudWatch Log Group" "$LOG_GROUP_NAME" "$LOG_GROUP_NAME" "aws_cloudwatch_log_group.ecs"
+          if ! import_if_exists "CloudWatch Log Group" "$LOG_GROUP_NAME" "$LOG_GROUP_NAME" "aws_cloudwatch_log_group.ecs"; then
+            # If import fails, delete the existing log group
+            echo "❌ CloudWatch Log Group import failed, deleting existing log group..."
+            if aws logs delete-log-group --log-group-name "$LOG_GROUP_NAME" 2>/dev/null; then
+              echo "✅ Existing CloudWatch Log Group deleted"
+              sleep 5
+            else
+              echo "⚠️ Failed to delete CloudWatch Log Group"
+            fi
+          fi
+        else
+          echo "ℹ️ No existing CloudWatch Log Group found"
         fi
         
         # 4. Handle IAM Roles
+        echo "🔍 Checking for existing IAM Roles..."
         for role_name in "automax-dealership-ecs-task-execution-role" "automax-dealership-ecs-task-role"; do
           if aws iam get-role --role-name "$role_name" &>/dev/null; then
+            echo "🔄 Found existing IAM Role: $role_name"
+            
             if [ "$role_name" = "automax-dealership-ecs-task-execution-role" ]; then
-              import_if_exists "IAM Role" "$role_name" "$role_name" "aws_iam_role.ecs_task_execution"
+              if ! import_if_exists "IAM Role" "$role_name" "$role_name" "aws_iam_role.ecs_task_execution"; then
+                echo "❌ IAM Role import failed for $role_name"
+                echo "⚠️ Skipping IAM role deletion (requires careful handling)"
+              fi
             else
-              import_if_exists "IAM Role" "$role_name" "$role_name" "aws_iam_role.ecs_task"
+              if ! import_if_exists "IAM Role" "$role_name" "$role_name" "aws_iam_role.ecs_task"; then
+                echo "❌ IAM Role import failed for $role_name"
+                echo "⚠️ Skipping IAM role deletion (requires careful handling)"
+              fi
             fi
+          else
+            echo "ℹ️ IAM Role not found: $role_name"
           fi
         done
         
@@ -621,7 +644,13 @@ jobs:
           if aws logs describe-log-groups --log-group-name-prefix "/ecs/automax-dealership" --query 'logGroups[0].logGroupName' --output text 2>/dev/null | grep -q "/ecs/automax-dealership"; then
             if ! terraform state show aws_cloudwatch_log_group.ecs &>/dev/null; then
               echo "🔄 Importing CloudWatch Log Group..."
-              terraform import 'aws_cloudwatch_log_group.ecs' '/ecs/automax-dealership' || echo "Log group import failed"
+              if terraform import 'aws_cloudwatch_log_group.ecs' '/ecs/automax-dealership' 2>/dev/null; then
+                echo "✅ CloudWatch Log Group import successful"
+              else
+                echo "❌ CloudWatch Log Group import failed, deleting existing log group..."
+                aws logs delete-log-group --log-group-name "/ecs/automax-dealership" 2>/dev/null || echo "Failed to delete log group"
+                sleep 5
+              fi
             fi
           fi
           

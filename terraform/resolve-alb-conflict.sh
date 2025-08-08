@@ -56,6 +56,31 @@ cleanup_orphaned_resources() {
     else
         echo "ℹ️ No Target Group found with name: $TG_NAME"
     fi
+    
+    # Check for orphaned CloudWatch Log Groups
+    echo "🔍 Checking for orphaned CloudWatch Log Groups..."
+    local log_group_name="/ecs/${PROJECT_NAME}"
+    
+    if aws logs describe-log-groups --log-group-name-prefix "$log_group_name" --query 'logGroups[0].logGroupName' --output text 2>/dev/null | grep -q "$log_group_name"; then
+        echo "🔄 Found existing CloudWatch Log Group: $log_group_name"
+        
+        # Check if it's in Terraform state
+        if ! check_tf_state "aws_cloudwatch_log_group.ecs"; then
+            echo "🔄 CloudWatch Log Group exists in AWS but not in Terraform state"
+            echo "🗑️ Deleting existing CloudWatch Log Group to avoid conflicts..."
+            
+            if aws logs delete-log-group --log-group-name "$log_group_name" 2>/dev/null; then
+                echo "✅ Existing CloudWatch Log Group deleted"
+                sleep 5
+            else
+                echo "⚠️ Failed to delete CloudWatch Log Group"
+            fi
+        else
+            echo "✅ CloudWatch Log Group already in Terraform state"
+        fi
+    else
+        echo "ℹ️ No existing CloudWatch Log Group found"
+    fi
 }
 
 # Function to safely import or remove resource
