@@ -226,7 +226,7 @@ resource "aws_security_group" "ecs" {
   }
 }
 
-# Application Load Balancer - Check if exists, create if not
+# Application Load Balancer - Create only if it doesn't exist
 # AWS Requirement: ALB needs minimum 2 subnets in different AZs for high availability
 # Free Tier: ALB provides 750 hours/month for 12 months (more than enough for 24/7)
 resource "aws_lb" "main" {
@@ -245,6 +245,7 @@ resource "aws_lb" "main" {
 
   lifecycle {
     ignore_changes = [tags]
+    prevent_destroy = false
   }
 }
 
