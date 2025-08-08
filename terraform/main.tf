@@ -227,10 +227,11 @@ resource "aws_security_group" "ecs" {
 }
 
 # Application Load Balancer - Check if exists, create if not
+# AWS Free Tier: ALB provides 750 hours/month for 12 months (more than enough for 24/7)
 resource "aws_lb" "main" {
   name               = "${var.project_name}-alb"
   internal           = false
-  load_balancer_type = "application"
+  load_balancer_type = "application"  # Free tier eligible
   security_groups    = [aws_security_group.alb.id]
   subnets            = aws_subnet.public[*].id
 
@@ -238,6 +239,7 @@ resource "aws_lb" "main" {
 
   tags = {
     Name = "${var.project_name}-alb"
+    Note = "AWS Free Tier: 750 hours/month included"
   }
 
   lifecycle {
@@ -317,6 +319,7 @@ resource "aws_ecr_lifecycle_policy" "main" {
 }
 
 # ECS Cluster
+# AWS Free Tier: ECS cluster management is free, only pay for underlying resources
 resource "aws_ecs_cluster" "main" {
   name = "${var.project_name}-cluster"
 
@@ -331,6 +334,7 @@ resource "aws_ecs_cluster" "main" {
 
   tags = {
     Name = "${var.project_name}-cluster"
+    Note = "AWS Free Tier: ECS cluster management is free"
   }
 }
 
