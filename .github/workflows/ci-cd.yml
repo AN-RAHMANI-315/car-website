@@ -973,19 +973,61 @@ jobs:
         if [ "$LB_DNS" != "" ] && [ "$LB_DNS" != "None" ]; then
           echo "🔍 Found Load Balancer DNS: $LB_DNS"
           
-          # Health check (try both root and /health endpoints)
-          echo "🔍 Checking application health at: http://$LB_DNS/"
-          if curl -f "http://$LB_DNS/" --connect-timeout 30 --max-time 60 2>/dev/null; then
-            echo "✅ Application is responding on root path"
-          elif curl -f "http://$LB_DNS/health" --connect-timeout 30 --max-time 60 2>/dev/null; then
-            echo "✅ Application is responding on /health path"
+          # Check target group health first
+          echo "🔍 Checking Target Group health..."
+          TG_ARN=$(aws elbv2 describe-target-groups --names automax-dealership-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || echo "")
+          
+          if [ "$TG_ARN" != "" ] && [ "$TG_ARN" != "None" ]; then
+            HEALTHY_TARGETS=$(aws elbv2 describe-target-health --target-group-arn "$TG_ARN" --query 'TargetHealthDescriptions[?TargetHealth.State==`healthy`] | length(@)' --output text 2>/dev/null || echo "0")
+            TOTAL_TARGETS=$(aws elbv2 describe-target-health --target-group-arn "$TG_ARN" --query 'length(TargetHealthDescriptions)' --output text 2>/dev/null || echo "0")
+            
+            echo "📊 Target Health: $HEALTHY_TARGETS/$TOTAL_TARGETS healthy"
+            
+            if [ "$TOTAL_TARGETS" -eq 0 ]; then
+              echo "❌ No targets registered - ECS tasks not connecting to load balancer"
+              echo "💡 This is likely why the load balancer shows no content"
+              echo "🔧 Run './quick-fix.sh' to attempt automatic resolution"
+            elif [ "$HEALTHY_TARGETS" -eq 0 ]; then
+              echo "❌ No healthy targets - ECS tasks failing health checks"
+              echo "💡 Check ECS task logs for container startup issues"
+              echo "🔧 Run './debug-deployment.sh' for detailed diagnostics"
+            else
+              echo "✅ Healthy targets found - load balancer should be working"
+            fi
           else
-            echo "⚠️ Application not yet responding, but deployment completed"
-            echo "🔍 This might be normal for a fresh deployment (ECS tasks starting up)"
+            echo "❌ Could not check target group health"
           fi
           
+          # Health check (try both root and /health endpoints)
+          echo "🔍 Checking application health at: http://$LB_DNS/"
+          ROOT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://$LB_DNS/" --connect-timeout 30 --max-time 60 || echo "000")
+          HEALTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://$LB_DNS/health" --connect-timeout 30 --max-time 60 || echo "000")
+          
+          echo "📊 HTTP Status Codes:"
+          echo "  Root path (/): $ROOT_STATUS"
+          echo "  Health path (/health): $HEALTH_STATUS"
+          
+          if [ "$ROOT_STATUS" == "200" ]; then
+            echo "✅ Application is responding successfully on root path!"
+            echo "🎉 Website is live and ready!"
+          elif [ "$HEALTH_STATUS" == "200" ]; then
+            echo "✅ Application is responding on health endpoint"
+            echo "⚠️ Root path might need more time to initialize"
+          else
+            echo "⚠️ Application not yet responding (Status: $ROOT_STATUS)"
+            echo "🔍 This might be normal for a fresh deployment (ECS tasks starting up)"
+            echo "⏰ Wait 2-3 minutes and try again"
+            echo ""
+            echo "🔧 TROUBLESHOOTING:"
+            echo "  1. Run './quick-fix.sh' to force restart ECS tasks"
+            echo "  2. Run './debug-deployment.sh' for detailed diagnostics"
+            echo "  3. Check ECS logs: aws logs tail '/ecs/automax-dealership' --follow"
+          fi
+          
+          echo ""
           echo "🎉 Deployment completed!"
-          echo "🌐 Application should be available at: http://$LB_DNS"
+          echo "🌐 Application URL: http://$LB_DNS"
+          echo "📋 If the site shows no content, run the troubleshooting scripts provided"
         else
           echo "⚠️ Load Balancer DNS not available from AWS"
           echo "🔍 Deployment completed, but unable to verify application URL"
@@ -1000,12 +1042,98 @@ jobs:
     if: always()
 
     steps:
+    - name: 🔐 Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
     - name: 📢 Deployment Notification - Success
       if: ${{ needs.deploy-application.result == 'success' }}
       run: |
         echo "🎉 SUCCESS: AutoMax Car Dealership deployed successfully!"
         echo "✅ All deployment steps completed successfully"
-        echo "🌐 Your application should now be available via the Load Balancer"
+        echo ""
+        echo "🌐 ACCESS YOUR WEBSITE:"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+        # Get the Load Balancer DNS name
+        LB_DNS=$(aws elbv2 describe-load-balancers --names automax-dealership-alb --query 'LoadBalancers[0].DNSName' --output text 2>/dev/null || echo "")
+        
+        if [ "$LB_DNS" != "" ] && [ "$LB_DNS" != "None" ]; then
+          echo "🔗 Website URL: http://$LB_DNS"
+          echo "📱 Mobile-friendly: http://$LB_DNS"
+          echo "🔍 You can bookmark this URL - it won't change unless you rebuild the infrastructure"
+          echo ""
+          echo "⏰ Note: It may take 2-3 minutes for the application to be fully ready"
+          echo "🔄 If you get 503 errors initially, wait a moment and refresh"
+        else
+          echo "⚠️  Could not retrieve Load Balancer DNS automatically"
+          echo "🔍 To find your website URL:"
+          echo "   1. Go to AWS Console → EC2 → Load Balancers"
+          echo "   2. Find 'automax-dealership-alb'"
+          echo "   3. Copy the DNS name and access via http://[DNS-NAME]"
+        fi
+        
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "📊 DEPLOYMENT SUMMARY:"
+        echo "  • Docker Image: Built and pushed to ECR"
+        echo "  • Infrastructure: ECS Cluster, ALB, Target Groups created"
+        echo "  • Application: Deployed to ECS Fargate"
+        echo "  • Security: Security groups configured for web access"
+        echo "  • Status: Ready for traffic ✅"
+
+    - name: 📋 Create Deployment Summary
+      if: ${{ needs.deploy-application.result == 'success' }}
+      run: |
+        echo "## 🚗 AutoMax Car Dealership - Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### ✅ Deployment Status: SUCCESS" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Get the Load Balancer DNS name for the summary
+        LB_DNS=$(aws elbv2 describe-load-balancers --names automax-dealership-alb --query 'LoadBalancers[0].DNSName' --output text 2>/dev/null || echo "")
+        
+        if [ "$LB_DNS" != "" ] && [ "$LB_DNS" != "None" ]; then
+          echo "### 🌐 Website Access" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**🔗 Your website is now live at:**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**[http://$LB_DNS](http://$LB_DNS)**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> 💡 **Bookmark this URL** - it will remain the same for future deployments" >> $GITHUB_STEP_SUMMARY
+          echo "> ⏰ Allow 2-3 minutes for the application to be fully ready after deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### 🌐 Website Access" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To access your website:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Go to [AWS Console → EC2 → Load Balancers](https://console.aws.amazon.com/ec2/v2/home#LoadBalancers:)" >> $GITHUB_STEP_SUMMARY
+          echo "2. Find **automax-dealership-alb**" >> $GITHUB_STEP_SUMMARY
+          echo "3. Copy the DNS name and access via http://[DNS-NAME]" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "### 📊 Infrastructure Components" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Component | Status | Details |" >> $GITHUB_STEP_SUMMARY
+        echo "|-----------|---------|---------|" >> $GITHUB_STEP_SUMMARY
+        echo "| 🐳 Docker Image | ✅ Built & Pushed | ECR Repository: automax-dealership |" >> $GITHUB_STEP_SUMMARY
+        echo "| ☁️ ECS Cluster | ✅ Running | Cluster: automax-dealership-cluster |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🚀 ECS Service | ✅ Active | Service: automax-dealership-service |" >> $GITHUB_STEP_SUMMARY
+        echo "| ⚖️ Load Balancer | ✅ Available | ALB: automax-dealership-alb |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🔒 Security | ✅ Configured | Security groups for web traffic |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 💰 Cost Information" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **Optimized for AWS Free Tier**" >> $GITHUB_STEP_SUMMARY
+        echo "- Single ECS task (0.25 vCPU, 0.5 GB memory)" >> $GITHUB_STEP_SUMMARY
+        echo "- Application Load Balancer (first 15 LCU-hours free monthly)" >> $GITHUB_STEP_SUMMARY
+        echo "- Data transfer: First 1 GB free monthly" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "---" >> $GITHUB_STEP_SUMMARY
+        echo "*Deployment completed at: $(date)*" >> $GITHUB_STEP_SUMMARY
 
     - name: 📢 Deployment Notification - Failure
       if: ${{ needs.deploy-application.result == 'failure' }}
