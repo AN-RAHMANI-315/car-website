@@ -790,12 +790,59 @@ jobs:
         TASK_DEF_NAME="${{ env.ECS_TASK_DEFINITION }}"
         echo "🔍 Looking for task definition: $TASK_DEF_NAME"
         
+        # First, get current Target Group ARN from Terraform to ensure consistency
+        cd terraform
+        CURRENT_TG_ARN=""
+        if terraform output target_group_arn &>/dev/null; then
+          CURRENT_TG_ARN=$(terraform output -raw target_group_arn)
+          echo "🔍 Current Target Group ARN from Terraform: $CURRENT_TG_ARN"
+        else
+          echo "⚠️ Target Group ARN not available from Terraform output"
+          # Try to find it directly from AWS
+          CURRENT_TG_ARN=$(aws elbv2 describe-target-groups --names automax-dealership-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || echo "")
+          if [ "$CURRENT_TG_ARN" != "" ] && [ "$CURRENT_TG_ARN" != "None" ]; then
+            echo "🔍 Found Target Group ARN from AWS: $CURRENT_TG_ARN"
+          else
+            echo "❌ Could not find Target Group ARN anywhere. This indicates a deployment conflict."
+            echo "🔄 Infrastructure exists but Target Group is missing - using force deployment"
+            echo "force-deployment=true" >> $GITHUB_OUTPUT
+            cd ..
+            # Don't exit here - continue to check task definition for further conflicts
+          fi
+        fi
+        cd ..
+        
         # Check if task definition exists
         if aws ecs describe-task-definition --task-definition "$TASK_DEF_NAME" &>/dev/null; then
           echo "✅ Task definition exists, downloading current version..."
           aws ecs describe-task-definition \
             --task-definition "$TASK_DEF_NAME" \
             --query taskDefinition > task-definition.json
+          
+          # Verify that the task definition doesn't reference a non-existent Target Group
+          if grep -q "targetGroupArn" task-definition.json; then
+            TASK_TG_ARN=$(jq -r '.loadBalancers[0].targetGroupArn' task-definition.json 2>/dev/null || echo "")
+            if [ "$TASK_TG_ARN" != "" ] && [ "$TASK_TG_ARN" != "null" ]; then
+              echo "📋 Task definition references Target Group ARN: $TASK_TG_ARN"
+              
+              # Check if this Target Group actually exists
+              if ! aws elbv2 describe-target-groups --target-group-arns "$TASK_TG_ARN" &>/dev/null; then
+                echo "❌ Task definition references non-existent Target Group: $TASK_TG_ARN"
+                echo "🔄 This is the source of the deployment error!"
+                echo "🔄 Will use force deployment to bypass this conflict"
+                echo "force-deployment=true" >> $GITHUB_OUTPUT
+              elif [ "$CURRENT_TG_ARN" != "" ] && [ "$TASK_TG_ARN" != "$CURRENT_TG_ARN" ]; then
+                echo "⚠️ Task definition references different Target Group ARN: $TASK_TG_ARN"
+                echo "🔄 Current Target Group ARN: $CURRENT_TG_ARN"
+                echo "🔄 Will use force deployment to update to current TG"
+                echo "force-deployment=true" >> $GITHUB_OUTPUT
+              else
+                echo "✅ Task definition Target Group ARN is valid and current"
+              fi
+            fi
+          else
+            echo "ℹ️ Task definition has no Target Group ARN reference"
+          fi
         else
           echo "⚠️ Task definition doesn't exist yet (first deployment)"
           echo "🔄 Terraform should have created it. Let's wait and retry..."
@@ -817,9 +864,23 @@ jobs:
         fi
       id: check-task-def
 
+    - name: 🔍 Debug Deployment Strategy
+      run: |
+        echo "🔍 Deployment Strategy Decision:"
+        echo "  first-deployment: ${{ steps.check-task-def.outputs.first-deployment }}"
+        echo "  force-deployment: ${{ steps.check-task-def.outputs.force-deployment }}"
+        
+        if [ "${{ steps.check-task-def.outputs.force-deployment }}" == "true" ]; then
+          echo "🔄 FORCE DEPLOYMENT: Bypassing aws-actions due to Target Group conflicts"
+        elif [ "${{ steps.check-task-def.outputs.first-deployment }}" == "true" ]; then
+          echo "🎯 FIRST DEPLOYMENT: Using direct ECS service update"
+        else
+          echo "✅ NORMAL DEPLOYMENT: Using aws-actions/amazon-ecs-deploy-task-definition"
+        fi
+
     - name: 🔄 Update Task Definition (if exists)
       id: task-def
-      if: steps.check-task-def.outputs.first-deployment != 'true'
+      if: steps.check-task-def.outputs.first-deployment != 'true' && steps.check-task-def.outputs.force-deployment != 'true'
       uses: aws-actions/amazon-ecs-render-task-definition@v1
       with:
         task-definition: task-definition.json
@@ -827,7 +888,7 @@ jobs:
         image: ${{ needs.build.outputs.image-tag }}
 
     - name: 🚀 Deploy to Amazon ECS (Update Existing)
-      if: steps.check-task-def.outputs.first-deployment != 'true'
+      if: steps.check-task-def.outputs.first-deployment != 'true' && steps.check-task-def.outputs.force-deployment != 'true'
       uses: aws-actions/amazon-ecs-deploy-task-definition@v1
       with:
         task-definition: ${{ steps.task-def.outputs.task-definition }}
@@ -835,20 +896,31 @@ jobs:
         cluster: ${{ env.ECS_CLUSTER }}
         wait-for-service-stability: true
 
-    - name: 🎯 Deploy to Amazon ECS (First Deployment)
-      if: steps.check-task-def.outputs.first-deployment == 'true'
+    - name: 🎯 Deploy to Amazon ECS (First Deployment or Force Update)
+      if: steps.check-task-def.outputs.first-deployment == 'true' || steps.check-task-def.outputs.force-deployment == 'true'
       run: |
-        echo "🎯 First deployment detected - verifying ECS infrastructure..."
+        if [ "${{ steps.check-task-def.outputs.force-deployment }}" == "true" ]; then
+          echo "🔄 Force deployment triggered due to Target Group ARN mismatch"
+          echo "This avoids the 'target group does not exist' error"
+        else
+          echo "🎯 First deployment detected - verifying ECS infrastructure..."
+        fi
         
         # Get the actual resource names from Terraform outputs
         cd terraform
-        CLUSTER_NAME=$(terraform output -raw ecs_cluster_name)
-        SERVICE_NAME=$(terraform output -raw ecs_service_name)
+        if terraform output ecs_cluster_name &>/dev/null && terraform output ecs_service_name &>/dev/null; then
+          CLUSTER_NAME=$(terraform output -raw ecs_cluster_name)
+          SERVICE_NAME=$(terraform output -raw ecs_service_name)
+          echo "🔍 Using Terraform-created resources:"
+          echo "  Cluster: $CLUSTER_NAME"
+          echo "  Service: $SERVICE_NAME"
+        else
+          echo "❌ Could not get cluster/service names from Terraform output"
+          echo "🔍 Available outputs:"
+          terraform output || echo "No outputs available"
+          exit 1
+        fi
         cd ..
-        
-        echo "🔍 Using Terraform-created resources:"
-        echo "  Cluster: $CLUSTER_NAME"
-        echo "  Service: $SERVICE_NAME"
         
         # First, verify that the ECS cluster exists
         echo "🔍 Checking if ECS cluster exists..."
@@ -878,6 +950,32 @@ jobs:
           if ! aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" --query 'services[0].serviceName' --output text 2>/dev/null | grep -q "$SERVICE_NAME"; then
             echo "❌ ECS service still not found after waiting. Terraform may have failed to create it."
             echo "🔍 Listing all services in cluster:"
+            aws ecs list-services --cluster "$CLUSTER_NAME" --query 'serviceArns' --output table || echo "No services found"
+            exit 1
+          fi
+        fi
+        echo "✅ ECS service found: $SERVICE_NAME"
+        
+        # Now safely trigger the service update with new image
+        echo "🚀 Updating ECS service with new image..."
+        echo "🔍 New image: ${{ needs.build.outputs.image-tag }}"
+        
+        # Update the service to use the new image by forcing a new deployment
+        # This bypasses the Target Group ARN issue by using the service's current configuration
+        aws ecs update-service \
+          --cluster "$CLUSTER_NAME" \
+          --service "$SERVICE_NAME" \
+          --force-new-deployment
+        
+        echo "✅ ECS service deployment triggered"
+        
+        # Wait for deployment to complete
+        echo "⏳ Waiting for service to stabilize..."
+        aws ecs wait services-stable \
+          --cluster "$CLUSTER_NAME" \
+          --services "$SERVICE_NAME"
+        
+        echo "✅ ECS service deployment completed"
             aws ecs list-services --cluster "$CLUSTER_NAME" --query 'serviceArns' --output table || echo "No services found"
             exit 1
           fi
